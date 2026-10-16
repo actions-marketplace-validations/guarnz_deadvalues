@@ -1,11 +1,14 @@
-```text
- ____  _____ _____ ____  _____ _____ __    _____ _____ _____
-|    \|   __|  _  |    \|  |  |  _  |  |  |  |  |   __|   __|
-|  |  |   __|     |  |  |  |  |     |  |__|  |  |   __|__   |
-|____/|_____|__|__|____/ \___/|__|__|_____|_____|_____|_____|
-```
+<p align="center">
+  <img src="https://raw.githubusercontent.com/guarnz/deadvalues/main/docs/assets/logo.svg" alt="deadvalues" width="520">
+</p>
 
-[![Release](https://img.shields.io/github/v/release/guarnz/deadvalues?sort=semver&label=Release)](https://github.com/guarnz/deadvalues/releases) [![Go](https://img.shields.io/github/go-mod/go-version/guarnz/deadvalues?logo=go&logoColor=white&label=Go)](https://github.com/guarnz/deadvalues/blob/main/go.mod) [![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/guarnz/deadvalues?label=OpenSSF%20Scorecard)](https://securityscorecards.dev/viewer/?uri=github.com/guarnz/deadvalues) [![GitOps](https://img.shields.io/badge/GitOps-Argo_CD_%7C_Flux-326CE5?logo=git&logoColor=white)](https://github.com/guarnz/deadvalues/blob/main/docs/argo-flux.md) [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/deadvalues)](https://artifacthub.io/packages/search?repo=deadvalues)
+<p align="center">
+  <a href="https://github.com/guarnz/deadvalues/releases"><img src="https://img.shields.io/github/v/release/guarnz/deadvalues?sort=semver&amp;label=Release" alt="Release"></a>
+  <a href="https://github.com/guarnz/deadvalues/blob/main/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/guarnz/deadvalues?logo=go&amp;logoColor=white&amp;label=Go" alt="Go"></a>
+  <a href="https://securityscorecards.dev/viewer/?uri=github.com/guarnz/deadvalues"><img src="https://img.shields.io/ossf-scorecard/github.com/guarnz/deadvalues?label=OpenSSF%20Scorecard" alt="OpenSSF Scorecard"></a>
+  <a href="https://github.com/guarnz/deadvalues/blob/main/docs/argo-flux.md"><img src="https://img.shields.io/badge/GitOps-Argo_CD_%7C_Flux-326CE5?logo=git&amp;logoColor=white" alt="GitOps"></a>
+  <a href="https://artifacthub.io/packages/search?repo=deadvalues"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/deadvalues" alt="Artifact Hub"></a>
+</p>
 
 **Helm values dead code detector.** Find the keys in your values files that have **no effect**, and the ones a chart upgrade silently breaks.
 
@@ -29,14 +32,14 @@ example  webapp 0.1.0  ←  config/example/values.yaml
 43 renders in 21ms, 1 random fields ignored
 note: list the APIs your cluster serves under apiVersions in .deadvalues.yaml to resolve API-dependent keys
 
-  REDUNDANT   image.repository           = chart default "nginx"
-  REDUNDANT   ingress.enabled            = chart default false
+  DEAD        service.prot               8080  (key not in chart values.yaml)
   CONDITIONAL ingress.host               "app.example.com"  (only when ingress.enabled=true)
   CONDITIONAL monitoring.serviceMonitor  true  (only when the cluster serves monitoring.coreos.com/v1/ServiceMonitor)
-  REDUNDANT   secretKey                  "SECRET"  (= fallback hardcoded in the template)
-  DEAD        service.prot               8080  (key not in chart values.yaml)
-  REDUNDANT   service.type               = chart default "ClusterIP"
   CONDITIONAL sub.size                   "large"  (only when sub.enabled=true)
+  REDUNDANT   image.repository           = chart default "nginx"
+  REDUNDANT   ingress.enabled            = chart default false
+  REDUNDANT   secretKey                  "SECRET"  (= fallback hardcoded in the template)
+  REDUNDANT   service.type               = chart default "ClusterIP"
 
   1 dead, 3 conditional, 4 redundant, 5 alive, 1 group, 1 required
 ```
@@ -56,11 +59,24 @@ example  webapp 0.1.0 → 0.2.0
   1 breaking, 1 pinned, 1 changed, 1 fixed
 ```
 
+## Compared with helm-diff and argocd-diff-preview
+
+[helm-diff](https://github.com/databus23/helm-diff) and [argocd-diff-preview](https://github.com/dag-andersen/argocd-diff-preview) show what the rendered manifests will look like. deadvalues shows whether your values still do what you think they do.
+
+| Situation | Manifest diff | deadvalues |
+|---|---|---|
+| A chart upgrade stops reading a key you set | The field leaves the manifest, among the rest of the upgrade; you work out the cause | `BREAKING labels.team ALIVE → DEAD` |
+| A default changes and your value holds the old one | Nothing: the manifest does not change | `PINNED service.type` |
+| A typo that never had an effect | Nothing: an ignored key changes nothing | `DEAD service.prot` |
+| A value equal to the chart default | Nothing | `REDUNDANT image.repository` |
+
+Use both: the diff shows what the cluster gets, deadvalues shows which line of your values file caused it, or did nothing.
+
 ## Install
 
 | Method | Command |
 |---|---|
-| Binary | Download from the [releases](https://github.com/guarnz/deadvalues/releases) (Linux, macOS, Windows; amd64 and arm64) |
+| Binary | Download the [file for your system](https://github.com/guarnz/deadvalues/blob/main/docs/install.md#binary) (Linux, macOS, Windows) |
 | Go 1.26+ | `go install github.com/guarnz/deadvalues/cmd/deadvalues@latest` |
 | Helm plugin | `helm plugin install https://github.com/guarnz/deadvalues` (Helm 4: add `--verify=false`) |
 | Container | `docker run --rm -v "$PWD:/repo" ghcr.io/guarnz/deadvalues scan apps` |

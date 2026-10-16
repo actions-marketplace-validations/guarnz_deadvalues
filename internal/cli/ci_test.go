@@ -132,6 +132,72 @@ spec:
 	}
 }
 
+func TestScanChangedSinceJudgesSharedFiles(t *testing.T) {
+	root := sharedRepo(t)
+	git := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", root, "-c", "user.email=t@t", "-c", "user.name=t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	git("add", "-A")
+	git("commit", "-qm", "base")
+
+	two := filepath.Join(root, "apps", "two.yaml")
+	data, err := os.ReadFile(two)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, two, strings.Replace(string(data), "name: two", "name: two\n  labels:\n    touched: \"true\"", 1))
+
+	out, _ := runCLI(t, "scan", filepath.Join(root, "apps"), "--changed-since", "HEAD", "--repo-root", root, "-o", "json")
+	checks := decodeChecks(t, out)
+	if len(checks) != 1 || checks[0].App != "two" {
+		t.Fatalf("only two changed and only two must be reported, got %+v\n%s", checks, out)
+	}
+	found := map[string]string{}
+	for _, k := range checks[0].Keys {
+		found[k.Key] = k.Status
+		if k.Key == "labels.team" && k.UsedBy != "one" {
+			t.Errorf("labels.team is used by one, which loads the same file: usedBy=%q status=%s", k.UsedBy, k.Status)
+		}
+	}
+	if found["service.prot"] != "DEAD" {
+		t.Errorf("service.prot is dead in every app loading the file, got %q\n%s", found["service.prot"], out)
+	}
+}
+
+func TestScanChangedSinceUsesMergeBase(t *testing.T) {
+	root := sharedRepo(t)
+	git := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", root, "-c", "user.email=t@t", "-c", "user.name=t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	git("add", "-A")
+	git("commit", "-qm", "base")
+	git("checkout", "-q", "-b", "feature")
+	git("checkout", "-q", "main")
+	two := filepath.Join(root, "apps", "two.yaml")
+	data, err := os.ReadFile(two)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, two, strings.Replace(string(data), "name: two", "name: two\n  labels:\n    touched: \"true\"", 1))
+	git("commit", "-qam", "main moves on")
+	git("checkout", "-q", "feature")
+	writeFile(t, filepath.Join(root, "values", "one-only.yaml"), "replicas: 4\n")
+
+	out, _ := runCLI(t, "scan", filepath.Join(root, "apps"), "--changed-since", "main", "--repo-root", root, "-o", "json")
+	checks := decodeChecks(t, out)
+	if len(checks) != 1 || checks[0].App != "one" {
+		t.Fatalf("only one changed on the branch; two changed on main after it started, got %+v\n%s", checks, out)
+	}
+}
+
 func TestFailedTargetIsReported(t *testing.T) {
 	root := t.TempDir()
 	copyDir(t, casesChart, filepath.Join(root, "charts", "cases"))

@@ -109,9 +109,9 @@ If removing a map changes the output but no child alone does (`{{ if or .a .b }}
 | Test | Meaning | Status |
 |---|---|---|
 | Your value equals the default in the chart's `values.yaml` (or is `null` with no default) | The default already does the same | `REDUNDANT` |
-| A **sentinel** value (another string, `!bool`, number+7919, an empty or one-item list) changes the output | The chart reads the key; your value matches a fallback in the template (`default "X" .Values.y`) | `REDUNDANT (implicit)` |
+| A **sentinel** value (another string, `!bool`, number+7919, an empty or one-item list, or the same list with every leaf replaced) changes the output | The chart reads the key; your value matches a fallback in the template (`default "X" .Values.y`) | `REDUNDANT (implicit)` |
 | Turning on a disabled `enabled` flag (next to the key, on an ancestor, or any `*.enabled: false` the user set) makes the key matter | The key only matters with the feature on | `CONDITIONAL` |
-| Declaring an API the chart checks with `.Capabilities.APIVersions.Has` makes the key matter | The key only matters when the cluster serves that API | `CONDITIONAL` |
+| Declaring an API the chart checks with `.Capabilities.APIVersions.Has` (or `has ... .Capabilities.APIVersions`) makes the key matter | The key only matters when the cluster serves that API | `CONDITIONAL` |
 | None of the above | The chart does not read the key | `DEAD` |
 
 The `enabled` test also tries every `*.enabled: false` the user set, not only the flags on the key's path: in kube-prometheus-stack, `defaultRules.rules.etcd` is gated by `kubeEtcd.enabled`, which is elsewhere in the tree. The statuses as users see them are in the [README](README.md#statuses).
@@ -167,7 +167,7 @@ The Flux reader produces the same target as the Argo one. The field-by-field rul
 - **Origins through the build.** After a build, a key still points to the file and line that set it: the HelmReleases and patches that take part in the build are indexed, and each key lists the files that set it in kustomize order (base first, overlay last).
 - **Resolving names.** Sources and ConfigMaps are found by name. When several match (`clusters/staging` and `clusters/production` both have a `podinfo` HelmRepository), a `configMapGenerator` ConfigMap wins, then the same namespace, then the object whose directory shares the longest prefix with the HelmRelease.
 - **`prune` on a HelmRelease.** `spec.values` lives inside the manifest, and Flux files often hold an `OCIRepository` and a `HelmRelease` together, so origins keep the document and the `spec.values` prefix, and `prune` removes only that key's lines in that document. Keys from a `configMapGenerator` file are removed from that file; inline ConfigMap `data` and Secrets are not edited.
-- **What stays outside.** `${var}` placeholders are left as text unless `.deadvalues.yaml` gives them values; SOPS-encrypted Secrets are skipped with a note; the Flux `Kustomization` objects in `clusters/<name>` are not followed, because some of their sources (`ExternalArtifact`) only exist in the cluster.
+- **What stays outside.** `${var}` placeholders are left as text unless `.deadvalues.yaml` gives them values; `valuesFrom` sources not in the repository or SOPS-encrypted are not read: their `targetPath` gets a placeholder where the chart has no default, and a note says so; the Flux `Kustomization` objects in `clusters/<name>` are not followed, because some of their sources (`ExternalArtifact`) only exist in the cluster.
 
 ---
 

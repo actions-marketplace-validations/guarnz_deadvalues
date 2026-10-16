@@ -22,7 +22,12 @@ type Options struct {
 	Namespace   string
 	KubeVersion string
 	APIVersions []string
+	// Placeholders are paths set from values that exist only on the cluster.
+	Placeholders [][]string
 }
+
+// Placeholder stands in for a value that exists only on the cluster.
+const Placeholder = "deadvalues-placeholder"
 
 type Renderer struct {
 	chart *chart.Chart
@@ -47,6 +52,12 @@ func New(c *chart.Chart, o Options) (*Renderer, error) {
 	}
 	if o.Namespace == "" {
 		o.Namespace = "default"
+	}
+	if len(o.Placeholders) > 0 {
+		var err error
+		if c, err = withPlaceholders(c, o.Placeholders); err != nil {
+			return nil, err
+		}
 	}
 	return &Renderer{
 		chart: c,
@@ -131,6 +142,24 @@ func clone(c *chart.Chart) *chart.Chart {
 	return out
 }
 
+// withPlaceholders sets the paths the chart has no default for, so the render
+// takes the same template branch as on the cluster, where the value exists.
+func withPlaceholders(c *chart.Chart, paths [][]string) (*chart.Chart, error) {
+	coalesced, err := commonutil.CoalesceValues(clone(c), map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	defaults := coalesced.AsMap()
+	out := clone(c)
+	for _, p := range paths {
+		if v, ok := values.Lookup(defaults, p); ok && v != nil && v != "" {
+			continue
+		}
+		values.SetPath(out.Values, p, Placeholder)
+	}
+	return out, nil
+}
+
 // WithAPIVersions returns a renderer for the same chart whose capabilities
 // also include apis, as if the cluster served them.
 func (r *Renderer) WithAPIVersions(apis []string) *Renderer {
@@ -139,11 +168,10 @@ func (r *Renderer) WithAPIVersions(apis []string) *Renderer {
 	return &Renderer{chart: r.chart, opts: r.opts, caps: caps}
 }
 
-var apiVersionsHas = regexp.MustCompile(`APIVersions\.Has\s+"([^"]+)"`)
+var apiVersionsHas = regexp.MustCompile(`APIVersions\.Has\s+"([^"]+)"|\bhas\s+"([^"]+)"\s+\$?\.Capabilities\.APIVersions\b`)
 
-// MissingAPIVersions lists the API versions the chart checks with
-// .Capabilities.APIVersions.Has that the configured capabilities lack,
-// leaving out versions Kubernetes removed before the rendered version.
+// MissingAPIVersions lists the API versions the chart checks for that the
+// capabilities lack, leaving out versions removed before the rendered one.
 func (r *Renderer) MissingAPIVersions() []string {
 	seen := map[string]bool{}
 	var out []string
@@ -151,7 +179,7 @@ func (r *Renderer) MissingAPIVersions() []string {
 	walk = func(c *chart.Chart) {
 		for _, t := range c.Templates {
 			for _, m := range apiVersionsHas.FindAllStringSubmatch(string(t.Data), -1) {
-				v := m[1]
+				v := m[1] + m[2]
 				if seen[v] || r.caps.APIVersions.Has(v) || removed(v, r.caps.KubeVersion) {
 					continue
 				}

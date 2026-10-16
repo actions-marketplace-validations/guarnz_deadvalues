@@ -65,7 +65,7 @@ func (g *globals) valuesJobs(t *targetFlags) ([]job, error) {
 		root = argo.RepoRoot(t.values[0])
 	}
 
-	all, _, err := g.dirJobs(root, root, func(string) bool { return true })
+	all, _, err := g.dirJobs(root, root, nil)
 	if err != nil {
 		return nil, &exitError{code: 2, err: err}
 	}
@@ -145,7 +145,7 @@ func enclosingChart(file, root string) (string, bool) {
 // dirJobs collects every target under dir: Argo CD Applications, standalone
 // HelmReleases, and HelmReleases produced by building each kustomize overlay.
 // Targets that cannot be resolved are returned as failed reports.
-func (g *globals) dirJobs(dir, root string, keep func(name string) bool) ([]job, []*report.Check, error) {
+func (g *globals) dirJobs(dir, root string, filter *appFilter) ([]job, []*report.Check, error) {
 	files, err := yamlFiles(dir)
 	if err != nil {
 		return nil, nil, err
@@ -168,7 +168,7 @@ func (g *globals) dirJobs(dir, root string, keep func(name string) bool) ([]job,
 		app, err := argo.Load(f)
 		switch {
 		case err == nil:
-			if !keep(app.Name) {
+			if !filter.keep(f, app.Name) {
 				continue
 			}
 			js, err := g.appJobs(app, root, nil)
@@ -191,7 +191,7 @@ func (g *globals) dirJobs(dir, root string, keep func(name string) bool) ([]job,
 	}
 
 	if len(releaseFiles) > 0 {
-		js, fails := g.fluxFileJobs(releaseFiles, root, nil, keep)
+		js, fails := g.fluxFileJobs(releaseFiles, root, nil, filter)
 		jobs = append(jobs, js...)
 		failed = append(failed, fails...)
 	}
@@ -205,7 +205,7 @@ func (g *globals) dirJobs(dir, root string, keep func(name string) bool) ([]job,
 				label = filepath.ToSlash(rel)
 			}
 		}
-		js, fails := g.fluxBuildJobs(r, root, label, keep)
+		js, fails := g.fluxBuildJobs(r, root, label, filter)
 		jobs = append(jobs, js...)
 		failed = append(failed, fails...)
 	}
@@ -258,21 +258,25 @@ func (g *globals) repoIndex(root string) *flux.Index {
 
 // fluxFileJobs reads HelmReleases as they are written in files, resolving
 // their sources and valuesFrom against the whole repository.
-func (g *globals) fluxFileJobs(files []string, root string, t *targetFlags, keep func(string) bool) ([]job, []*report.Check) {
+func (g *globals) fluxFileJobs(files []string, root string, t *targetFlags, filter *appFilter) ([]job, []*report.Check) {
 	res := &flux.Resolver{RepoRoot: root, Sources: g.repoIndex(root)}
 	var jobs []job
 	var failed []*report.Check
 	for _, f := range files {
+		res.Namespace = g.fluxTargetNamespace(root, filepath.Dir(f))
 		objs, err := flux.ParseFile(f, g.cfg.Flux.Substitute)
 		if err != nil {
 			failed = append(failed, report.Failed(f, err))
 			continue
 		}
 		for _, o := range objs {
-			if !flux.IsRelease(o) || (keep != nil && !keep(o.Name)) {
+			if !flux.IsRelease(o) {
 				continue
 			}
 			rel, err := res.Resolve(o)
+			if !filter.keep(f, appNames("", o, rel)...) {
+				continue
+			}
 			if err != nil {
 				c := report.Failed(o.ID(), err)
 				c.AppFile = f
@@ -292,11 +296,11 @@ func (g *globals) fluxFileJobs(files []string, root string, t *targetFlags, keep
 
 // fluxBuildJobs builds a kustomize overlay and reads the HelmReleases of the
 // output, with patches applied. Keys are traced back to the files that set them.
-func (g *globals) fluxBuildJobs(dir, root, label string, keep func(string) bool) ([]job, []*report.Check) {
-	name := label
-	if name == "" {
-		name = filepath.Base(dir)
+func (g *globals) fluxBuildJobs(dir, root, label string, filter *appFilter) ([]job, []*report.Check) {
+	if filter.skipsDir(dir) {
+		return nil, nil
 	}
+	name := relPath(root, dir)
 	out, err := flux.Build(dir, g.cfg.Flux.Substitute)
 	if err != nil {
 		return nil, []*report.Check{report.Failed(name, fmt.Errorf("kustomize build: %w", err))}
@@ -311,15 +315,19 @@ func (g *globals) fluxBuildJobs(dir, root, label string, keep func(string) bool)
 		Sources:   &flux.Index{Objects: append(append([]*flux.Object{}, flux.TreeGenerators(dir)...), objs...)},
 		Fallback:  g.repoIndex(root),
 		Attribute: attr.Origins,
+		Namespace: g.fluxTargetNamespace(root, dir),
 	}
 
 	var jobs []job
 	var failed []*report.Check
 	for _, o := range objs {
-		if !flux.IsRelease(o) || (keep != nil && !keep(o.Name)) {
+		if !flux.IsRelease(o) {
 			continue
 		}
 		rel, err := res.Resolve(o)
+		if !filter.keep(attr.File(o), appNames(label, o, rel)...) {
+			continue
+		}
 		if err != nil {
 			failed = append(failed, report.Failed(prefixed(label, o.ID()), err))
 			continue
@@ -334,17 +342,36 @@ func (g *globals) fluxBuildJobs(dir, root, label string, keep func(string) bool)
 	return jobs, failed
 }
 
+// fluxTargetNamespace is the targetNamespace of the Flux Kustomization that applies dir.
+func (g *globals) fluxTargetNamespace(root, dir string) string {
+	if ks := g.repoIndex(root).KustomizationFor(root, dir); ks != nil {
+		return flux.Str(ks.Node, "spec", "targetNamespace")
+	}
+	return ""
+}
+
+// appNames lists the names --only and --skip accept for a HelmRelease: its
+// metadata.name, namespace/name and the name the report shows.
+func appNames(label string, o *flux.Object, rel *flux.Release) []string {
+	names := []string{o.Name, o.ID(), prefixed(label, o.ID())}
+	if rel != nil {
+		names = append(names, rel.ID, prefixed(label, rel.ID))
+	}
+	return names
+}
+
 func releaseJob(rel *flux.Release, label, file, where string, t *targetFlags) (job, error) {
 	j := job{
-		name:      prefixed(label, rel.ID),
-		app:       rel.Object.Name,
-		appFile:   file,
-		ident:     "flux:" + where + ":" + rel.ID,
-		ref:       rel.Chart,
-		release:   rel.ReleaseName,
-		namespace: rel.Namespace,
-		vals:      rel.Values,
-		notes:     rel.Notes,
+		name:         prefixed(label, rel.ID),
+		app:          rel.Object.Name,
+		appFile:      file,
+		ident:        "flux:" + where + ":" + rel.ID,
+		ref:          rel.Chart,
+		release:      rel.ReleaseName,
+		namespace:    rel.Namespace,
+		vals:         rel.Values,
+		notes:        rel.Notes,
+		placeholders: rel.Placeholders,
 	}
 	if t != nil {
 		if err := addExtra(j.vals, t); err != nil {

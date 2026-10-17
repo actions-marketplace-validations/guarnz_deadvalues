@@ -110,7 +110,7 @@ If removing a map changes the output but no child alone does (`{{ if or .a .b }}
 |---|---|---|
 | Your value equals the default in the chart's `values.yaml` (or is `null` with no default) | The default already does the same | `REDUNDANT` |
 | A **sentinel** value (another string, `!bool`, number+7919, an empty or one-item list, or the same list with every leaf replaced) changes the output | The chart reads the key; your value matches a fallback in the template (`default "X" .Values.y`) | `REDUNDANT (implicit)` |
-| Turning on a disabled `enabled` flag (next to the key, on an ancestor, or any `*.enabled: false` the user set) makes the key matter | The key only matters with the feature on | `CONDITIONAL` |
+| Turning on a disabled `enabled` flag (next to the key, on an ancestor, or any `*.enabled: false` the user set), or all the disabled ones on its ancestors together (`hubble.enabled` and `hubble.relay.enabled`), makes the key matter | The key only matters with the feature on | `CONDITIONAL` |
 | Declaring an API the chart checks with `.Capabilities.APIVersions.Has` (or `has ... .Capabilities.APIVersions`) makes the key matter | The key only matters when the cluster serves that API | `CONDITIONAL` |
 | None of the above | The chart does not read the key | `DEAD` |
 
@@ -167,7 +167,7 @@ The Flux reader produces the same target as the Argo one. The field-by-field rul
 - **Origins through the build.** After a build, a key still points to the file and line that set it: the HelmReleases and patches that take part in the build are indexed, and each key lists the files that set it in kustomize order (base first, overlay last).
 - **Resolving names.** Sources and ConfigMaps are found by name. When several match (`clusters/staging` and `clusters/production` both have a `podinfo` HelmRepository), a `configMapGenerator` ConfigMap wins, then the same namespace, then the object whose directory shares the longest prefix with the HelmRelease.
 - **`prune` on a HelmRelease.** `spec.values` lives inside the manifest, and Flux files often hold an `OCIRepository` and a `HelmRelease` together, so origins keep the document and the `spec.values` prefix, and `prune` removes only that key's lines in that document. Keys from a `configMapGenerator` file are removed from that file; inline ConfigMap `data` and Secrets are not edited.
-- **What stays outside.** `${var}` placeholders are left as text unless `.deadvalues.yaml` gives them values; `valuesFrom` sources not in the repository or SOPS-encrypted are not read: their `targetPath` gets a placeholder where the chart has no default, and a note says so; the Flux `Kustomization` objects in `clusters/<name>` are not followed, because some of their sources (`ExternalArtifact`) only exist in the cluster.
+- **What stays outside.** `${var}` placeholders get the `postBuild` variables of the Flux `Kustomization` that applies the directory and the values in `.deadvalues.yaml`, and are otherwise left as text; `valuesFrom` sources not in the repository or SOPS-encrypted are not read: their `targetPath` gets a placeholder where the chart has no default, and a note says so; the Flux `Kustomization` objects in `clusters/<name>` are not followed, because some of their sources (`ExternalArtifact`) only exist in the cluster.
 
 ---
 
@@ -315,7 +315,7 @@ Not supported yet:
 
 | Item | Today |
 |---|---|
-| Following Flux `Kustomization` objects from `clusters/<name>` when the source is this repository, with their `postBuild` substitutions | point `scan` at the app directories; give `${var}` values in `flux.substitute` |
+| Following Flux `Kustomization` objects from `clusters/<name>`, and variables a parent `Kustomization` injects into its children with `patches` | point `scan` at the app directories; the `postBuild` of the `Kustomization` that applies a directory is read, the rest goes in `flux.substitute` |
 | Flux `chart.spec.valuesFiles` (values files inside the chart package) | a note says those keys are not taken into account |
 | Argo CD `ApplicationSet` | not read |
 | Flux charts from another git repository | an error |

@@ -121,6 +121,72 @@ spec:
 	}
 }
 
+func TestCheckAppliesFluxKustomizationVars(t *testing.T) {
+	root := fluxFixture(t)
+	writeFile(t, filepath.Join(root, "infrastructure", "vars", "release.yaml"), `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: vars
+  namespace: infra
+spec:
+  chart:
+    spec:
+      chart: ./charts/cases
+      sourceRef:
+        kind: GitRepository
+        name: platform
+  values:
+    name: ${APP_NAME}
+    labels:
+      team: ${TEAM}
+`)
+	writeFile(t, filepath.Join(root, "clusters", "main", "vars.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: team-vars
+  namespace: flux-system
+data:
+  TEAM: payments
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: vars
+  namespace: flux-system
+spec:
+  path: ./infrastructure/vars
+  postBuild:
+    substitute:
+      APP_NAME: web
+    substituteFrom:
+      - kind: ConfigMap
+        name: team-vars
+      - kind: Secret
+        name: absent
+`)
+	out, _ := runCLI(t, "check", "--app", filepath.Join(root, "infrastructure", "vars", "release.yaml"), "--repo-root", root, "-o", "json", "--fail-on", "none")
+	var c struct {
+		Notes []string `json:"notes"`
+		Keys  []struct {
+			Key   string      `json:"key"`
+			Value interface{} `json:"value"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(out), &c); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	got := map[string]interface{}{}
+	for _, k := range c.Keys {
+		got[k.Key] = k.Value
+	}
+	if got["name"] != "web" || got["labels.team"] != "payments" {
+		t.Errorf("values = %v, want name from substitute and labels.team from substituteFrom", got)
+	}
+	if !strings.Contains(strings.Join(c.Notes, "\n"), "variables from Secret absent are not in the repository") {
+		t.Errorf("notes = %q", c.Notes)
+	}
+}
+
 func TestScanSkipByAnyNameOrDirectory(t *testing.T) {
 	root := fluxFixture(t)
 	broken := filepath.Join(root, "apps", "broken")
@@ -313,6 +379,14 @@ spec:
 	}
 	if kinds["labels.team"] != "BREAKING" || kinds["service.type"] != "PINNED" || kinds["revisionHistoryLimit"] != "CHANGED" {
 		t.Errorf("changes = %v", kinds)
+	}
+	for _, skip := range []string{"cases", "web/cases", filepath.Join(root, "apps")} {
+		if out, code := runCLI(t, "diff", filepath.Join(root, "apps"), "--base", "HEAD", "--repo-root", root, "--skip", skip); code != 0 || !strings.Contains(out, "no chart version changed") {
+			t.Errorf("--skip %s: exit %d\n%s", skip, code, out)
+		}
+	}
+	if _, code := runCLI(t, "diff", "--app", filepath.Join(root, "apps", "cases.yaml"), "--to", "0.2.0", "--skip", "cases"); code != 2 {
+		t.Errorf("--skip with --app: exit %d, want 2", code)
 	}
 
 	git("add", "-A")

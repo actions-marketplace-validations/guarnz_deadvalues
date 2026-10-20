@@ -61,6 +61,11 @@ type job struct {
 	// only restricts findings to keys set in these values files (normalized
 	// paths), when the user asked about specific files with -f alone.
 	only map[string]bool
+	// skip is why the target is reported without being analyzed.
+	skip string
+	// kubeVersion and apiVersions are the app's own, as an Argo CD source can set them.
+	kubeVersion string
+	apiVersions []string
 }
 
 func (g *globals) jobs(t *targetFlags) ([]job, error) {
@@ -107,6 +112,11 @@ func (g *globals) appJobs(app *argo.Application, root string, t *targetFlags) ([
 	}
 	var out []job
 	for _, tg := range targets {
+		if tg.Skip != "" {
+			out = append(out, job{name: tg.Name, app: app.Name, appFile: app.File, ident: "argo:" + tg.Name,
+				sourceIndex: tg.SourceIndex, vals: values.New(), skip: tg.Skip})
+			continue
+		}
 		set := values.New()
 		for _, f := range tg.ValueFiles {
 			if err := set.AddFile(f); err != nil {
@@ -142,6 +152,8 @@ func (g *globals) appJobs(app *argo.Application, root string, t *targetFlags) ([
 			release:     tg.Release,
 			namespace:   tg.Namespace,
 			vals:        set,
+			kubeVersion: tg.KubeVersion,
+			apiVersions: tg.APIVersions,
 		}
 		if t != nil && t.release != "" {
 			j.release = t.release
@@ -186,11 +198,18 @@ func (g *globals) renderer(ctx context.Context, j job, ref source.Ref) (*render.
 	if err != nil {
 		return nil, err
 	}
+	kube, apis := g.kubeVersion, g.apiVersions
+	if j.kubeVersion != "" && !g.kubeVersionFlag {
+		kube = j.kubeVersion
+	}
+	if len(j.apiVersions) > 0 {
+		apis = append(append([]string{}, g.flagAPIVersions...), j.apiVersions...)
+	}
 	return render.New(c, render.Options{
 		Release:      j.release,
 		Namespace:    j.namespace,
-		KubeVersion:  g.kubeVersion,
-		APIVersions:  g.apiVersions,
+		KubeVersion:  kube,
+		APIVersions:  apis,
 		Placeholders: j.placeholders,
 	})
 }
@@ -266,6 +285,11 @@ func (g *globals) ignorer(app string) func([]string) bool {
 }
 
 func (g *globals) check(ctx context.Context, j job) *report.Check {
+	if j.skip != "" {
+		c := report.NotAnalyzed(j.name, j.skip)
+		c.AppFile = j.appFile
+		return c
+	}
 	a, err := g.analyze(ctx, j, j.ref)
 	if err != nil {
 		c := report.Failed(j.name, err)

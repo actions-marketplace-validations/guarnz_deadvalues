@@ -6,13 +6,15 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/guarnz/deadvalues/internal/git"
 	"github.com/guarnz/deadvalues/internal/source"
 )
 
@@ -20,6 +22,7 @@ type Application struct {
 	File      string
 	Name      string
 	Namespace string
+	Project   string
 	Sources   []Source
 }
 
@@ -34,6 +37,9 @@ type Source struct {
 
 type Helm struct {
 	ReleaseName             string                 `json:"releaseName"`
+	Namespace               string                 `json:"namespace"`
+	KubeVersion             string                 `json:"kubeVersion"`
+	APIVersions             []string               `json:"apiVersions"`
 	ValueFiles              []string               `json:"valueFiles"`
 	Values                  string                 `json:"values"`
 	ValuesObject            map[string]interface{} `json:"valuesObject"`
@@ -53,6 +59,7 @@ type manifest struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Spec struct {
+		Project     string   `json:"project"`
 		Source      *Source  `json:"source"`
 		Sources     []Source `json:"sources"`
 		Destination struct {
@@ -74,27 +81,37 @@ type Target struct {
 	Values      string
 	ValuesObj   map[string]interface{}
 	Parameters  []Parameter
+	// KubeVersion and APIVersions replace the cluster's when the source sets them, as in Argo CD.
+	KubeVersion string
+	APIVersions []string
+	// Skip is why a Helm source cannot be analyzed yet; it is reported, not rendered.
+	Skip string
 }
 
 var docSeparator = regexp.MustCompile(`(?m)^---\s*$`)
 
-func Load(path string) (*Application, error) {
+// Load reads every Argo CD Application in the file at path.
+func Load(path string) ([]*Application, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	app, err := Parse(data)
+	apps, err := Parse(data)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	app.File = path
-	return app, nil
+	for _, app := range apps {
+		app.File = path
+	}
+	return apps, nil
 }
 
 // ErrNotApplication is returned for YAML files that hold no Application.
 var ErrNotApplication = fmt.Errorf("no Argo CD Application found")
 
-func Parse(data []byte) (*Application, error) {
+// Parse returns every Application in the YAML documents, in file order.
+func Parse(data []byte) ([]*Application, error) {
+	var apps []*Application
 	for _, doc := range docSeparator.Split(string(data), -1) {
 		var m manifest
 		if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
@@ -103,26 +120,30 @@ func Parse(data []byte) (*Application, error) {
 		if m.Kind != "Application" {
 			continue
 		}
-		app := &Application{Name: m.Metadata.Name, Namespace: m.Spec.Destination.Namespace}
+		app := &Application{Name: m.Metadata.Name, Namespace: m.Spec.Destination.Namespace, Project: m.Spec.Project}
 		if m.Spec.Source != nil {
 			app.Sources = append(app.Sources, *m.Spec.Source)
 		}
 		app.Sources = append(app.Sources, m.Spec.Sources...)
-		return app, nil
+		apps = append(apps, app)
 	}
-	return nil, ErrNotApplication
+	if len(apps) == 0 {
+		return nil, ErrNotApplication
+	}
+	return apps, nil
 }
 
 // Targets resolves every Helm source of the Application. `$ref/...` value
 // files and local chart paths are resolved against repoRoot, the root of the
 // checkout that holds the Application.
 func (a *Application) Targets(repoRoot string) ([]Target, error) {
-	refs := map[string]bool{}
+	refs := map[string]string{}
 	for _, s := range a.Sources {
 		if s.Ref != "" {
-			refs[s.Ref] = true
+			refs[s.Ref] = s.RepoURL
 		}
 	}
+	origin := gitLine(repoRoot, "remote", "get-url", "origin")
 
 	var out []Target
 	for i, s := range a.Sources {
@@ -130,6 +151,7 @@ func (a *Application) Targets(repoRoot string) ([]Target, error) {
 			continue
 		}
 		t := Target{App: a.Name, SourceIndex: i, Namespace: a.Namespace, Release: a.Name}
+		env := a.buildEnv(s, repoRoot)
 		local := false
 		switch {
 		case s.Chart != "":
@@ -138,6 +160,11 @@ func (a *Application) Targets(repoRoot string) ([]Target, error) {
 		case s.Path != "":
 			dir := filepath.Join(repoRoot, filepath.FromSlash(s.Path))
 			if _, err := os.Stat(filepath.Join(dir, "Chart.yaml")); err != nil {
+				if s.Helm != nil {
+					t.Name = path.Base(strings.TrimSuffix(s.RepoURL, ".git"))
+					t.Skip = fmt.Sprintf("Helm chart at %s in %s is not in this repository; charts from other git repositories are not supported yet", s.Path, s.RepoURL)
+					out = append(out, t)
+				}
 				continue
 			}
 			t.Chart = source.Ref{Chart: dir}
@@ -151,8 +178,16 @@ func (a *Application) Targets(repoRoot string) ([]Target, error) {
 			if h.ReleaseName != "" {
 				t.Release = h.ReleaseName
 			}
+			if h.Namespace != "" {
+				t.Namespace = h.Namespace
+			}
+			t.KubeVersion, t.APIVersions = h.KubeVersion, h.APIVersions
 			for _, vf := range h.ValueFiles {
-				p, err := resolveValueFile(vf, repoRoot, s, local, refs)
+				if repo := otherRepo(vf, refs, origin); repo != "" {
+					t.Skip = fmt.Sprintf("value file %s comes from %s, another git repository; value files from other git repositories are not supported yet", vf, repo)
+					break
+				}
+				p, err := resolveValueFile(vf, repoRoot, s, local, refs, env)
 				if err != nil {
 					return nil, fmt.Errorf("%s: %w", a.Name, err)
 				}
@@ -166,7 +201,10 @@ func (a *Application) Targets(repoRoot string) ([]Target, error) {
 			}
 			t.Values = h.Values
 			t.ValuesObj = h.ValuesObject
-			t.Parameters = h.Parameters
+			for _, p := range h.Parameters {
+				p.Value = envsubst(p.Value, env)
+				t.Parameters = append(t.Parameters, p)
+			}
 		}
 		out = append(out, t)
 	}
@@ -181,25 +219,102 @@ func (a *Application) Targets(repoRoot string) ([]Target, error) {
 	return out, nil
 }
 
-func resolveValueFile(vf, repoRoot string, s Source, local bool, refs map[string]bool) (string, error) {
+// otherRepo is the repoURL of the $ref source of vf when it is not the checkout's origin;
+// without an origin every ref is taken as this repository.
+func otherRepo(vf string, refs map[string]string, origin string) string {
+	ref, _, _ := strings.Cut(strings.TrimPrefix(vf, "$"), "/")
+	repo, ok := refs[ref]
+	if !strings.HasPrefix(vf, "$") || !ok || origin == "" || normalizeRepo(repo) == normalizeRepo(origin) {
+		return ""
+	}
+	return repo
+}
+
+// normalizeRepo reduces a git URL to host/path, so https, ssh and scp forms of one repository match.
+func normalizeRepo(u string) string {
+	u = strings.ToLower(strings.TrimSpace(u))
+	if _, rest, ok := strings.Cut(u, "://"); ok {
+		u = rest
+	}
+	if i := strings.Index(u, "@"); i >= 0 && !strings.Contains(u[:i], "/") {
+		u = u[i+1:]
+	}
+	host, p, _ := strings.Cut(strings.Replace(u, ":", "/", 1), "/")
+	if first, rest, ok := strings.Cut(p, "/"); ok && first != "" && strings.Trim(first, "0123456789") == "" {
+		p = rest
+	}
+	return host + "/" + strings.TrimSuffix(strings.Trim(p, "/"), ".git")
+}
+
+func resolveValueFile(vf, repoRoot string, s Source, local bool, refs map[string]string, env map[string]string) (string, error) {
 	if strings.HasPrefix(vf, "$") {
 		ref, rest, _ := strings.Cut(strings.TrimPrefix(vf, "$"), "/")
-		if !refs[ref] {
+		if _, ok := refs[ref]; !ok {
 			return "", fmt.Errorf("value file %s: no source with ref %q", vf, ref)
 		}
-		return filepath.Join(repoRoot, filepath.FromSlash(rest)), nil
+		return filepath.Join(repoRoot, filepath.FromSlash(envsubst(rest, env))), nil
 	}
 	if !local {
 		return "", fmt.Errorf("value file %s is relative to a remote chart; only $ref/ paths are supported", vf)
 	}
-	return filepath.Join(repoRoot, filepath.FromSlash(s.Path), filepath.FromSlash(vf)), nil
+	return filepath.Join(repoRoot, filepath.FromSlash(s.Path), filepath.FromSlash(envsubst(vf, env))), nil
+}
+
+// buildEnv is the Argo CD build environment of a source, as substituted in Helm
+// parameters and value file paths; the revision is the chart version or the checkout's HEAD.
+func (a *Application) buildEnv(s Source, repoRoot string) map[string]string {
+	rev := s.TargetRevision
+	if s.Chart == "" {
+		if head := gitLine(repoRoot, "rev-parse", "HEAD"); head != "" {
+			rev = head
+		}
+	}
+	short := func(n int) string { return rev[:min(n, len(rev))] }
+	return map[string]string{
+		"ARGOCD_APP_NAME":                   a.Name,
+		"ARGOCD_APP_NAMESPACE":              a.Namespace,
+		"ARGOCD_APP_PROJECT_NAME":           a.Project,
+		"ARGOCD_APP_REVISION":               rev,
+		"ARGOCD_APP_REVISION_SHORT":         short(7),
+		"ARGOCD_APP_REVISION_SHORT_8":       short(8),
+		"ARGOCD_APP_SOURCE_REPO_URL":        s.RepoURL,
+		"ARGOCD_APP_SOURCE_PATH":            s.Path,
+		"ARGOCD_APP_SOURCE_TARGET_REVISION": s.TargetRevision,
+	}
+}
+
+// envsubst expands $VAR and ${VAR} like Argo CD: unknown variables are empty and $$ is a $.
+func envsubst(s string, env map[string]string) string {
+	return os.Expand(s, func(k string) string {
+		if k == "$" {
+			return "$"
+		}
+		return env[k]
+	})
+}
+
+var gitLines sync.Map
+
+// gitLine is the output of git args in repoRoot, trimmed and cached, or "" when git fails.
+func gitLine(repoRoot string, args ...string) string {
+	key := repoRoot + "\x00" + strings.Join(args, "\x00")
+	if v, ok := gitLines.Load(key); ok {
+		return v.(string)
+	}
+	out, err := git.Command(repoRoot, args...).Output()
+	line := ""
+	if err == nil {
+		line = strings.TrimSpace(string(out))
+	}
+	gitLines.Store(key, line)
+	return line
 }
 
 // RepoRoot returns the top level of the git checkout holding path, or the
 // directory of path when it is not inside a git repository.
 func RepoRoot(path string) string {
 	dir := filepath.Dir(path)
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	out, err := git.Command(dir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		abs, _ := filepath.Abs(dir)
 		return abs
@@ -211,11 +326,11 @@ func RepoRoot(path string) string {
 // (their merge base, or rev itself in a shallow clone), as absolute paths.
 func ChangedFiles(repoRoot, rev string) (map[string]bool, error) {
 	from := rev
-	if out, err := exec.Command("git", "-C", repoRoot, "merge-base", rev, "HEAD").Output(); err == nil {
+	if out, err := git.Command(repoRoot, "merge-base", rev, "HEAD").Output(); err == nil {
 		from = strings.TrimSpace(string(out))
 	}
 	var stderr bytes.Buffer
-	cmd := exec.Command("git", "-C", repoRoot, "diff", "--name-only", from)
+	cmd := git.Command(repoRoot, "diff", "--name-only", from)
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {

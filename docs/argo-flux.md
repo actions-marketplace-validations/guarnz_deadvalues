@@ -4,24 +4,31 @@
 
 | | Argo CD | Flux |
 |---|---|---|
-| Manifest | `Application`, single or multi-source | `HelmRelease` (`helm.toolkit.fluxcd.io/v2`) |
+| Manifest | `Application`, single or multi-source; every Application in a file is read, as in an app-of-apps file | `HelmRelease` (`helm.toolkit.fluxcd.io/v2`) |
 | Chart | `repoURL` + `chart` + `targetRevision`, or a local `path` | `chart.spec.sourceRef` → `HelmRepository` (HTTP or OCI), `GitRepository` in the same repo; `chartRef` → `OCIRepository` or `HelmChart`. Semver ranges (`>=1.0.0`, `1.x`) are resolved |
 | Values | `valueFiles` (`$values/` refs), `values`, `valuesObject`, `parameters` | `valuesFrom` ConfigMaps/Secrets (manifests or `configMapGenerator`, `targetPath`, `optional`), then `spec.values` |
 | Overlays | — | A directory with a `kustomization.yaml` is built in process (the same kustomize library Flux uses), so patches are applied; the `components` of the Flux `Kustomization` whose `spec.path` is that directory are added, as Flux does; each key still points to the file and line that set it |
-| Not read | `ApplicationSet` | the values of SOPS-encrypted Secrets and of sources not in the repository (reported as a note, see `valuesFrom` below), charts from other git repositories, `chart.spec.valuesFiles` (reported as a note), `${var}` you do not define (left as text) |
+| Not read | `ApplicationSet`; Helm charts and `$ref/` value files from other git repositories (listed as not analyzed, see below) | the values of SOPS-encrypted Secrets and of sources not in the repository (reported as a note, see `valuesFrom` below), charts from other git repositories, `chart.spec.valuesFiles` (reported as a note), `${var}` you do not define (left as text) |
 
 ## Argo CD Applications
 
 | Field | How it is read |
 |---|---|
 | `sources` with `ref: values` + `$values/path` | `$values` is the root of the local checkout: the git top level, or `--repo-root` |
+| A `ref` source whose `repoURL` is another repository than the checkout's `origin` | listed as not analyzed, with the value file and the repository, instead of reading a file of the same name here. https, ssh and `git@host:owner/repo` URLs of one repository match; without an `origin` remote every `ref` is taken as this repository |
 | `helm.valueFiles` without `$ref/` | relative to the `path` of a local chart; with a remote chart it is an error, only `$ref/` paths are supported |
 | `helm.values`, `helm.valuesObject` | used as values |
 | `helm.parameters` | applied on top, like `--set` |
+| Build environment (`$ARGOCD_APP_NAME`, `$ARGOCD_APP_NAMESPACE`, `$ARGOCD_APP_PROJECT_NAME`, `$ARGOCD_APP_SOURCE_PATH`, `$ARGOCD_APP_SOURCE_REPO_URL`, `$ARGOCD_APP_SOURCE_TARGET_REVISION`, `$ARGOCD_APP_REVISION` and its `_SHORT`/`_SHORT_8` forms) | substituted where Argo CD does it: in `helm.parameters` values and in `valueFiles` paths, not inside `values` or `valuesObject`. An unknown variable is empty and `$$` is a literal `$`. The revision is the chart version for a chart source, and the checkout's current commit for a git path |
 | `helm.releaseName` | the release name |
+| `helm.namespace` | the release namespace, as Argo CD templates with it; otherwise `destination.namespace` |
+| `helm.kubeVersion` | the Kubernetes version for that app, over `kubeVersion` of `.deadvalues.yaml`; `--kube-version` still wins |
+| `helm.apiVersions` | the APIs for that app, replacing `apiVersions` of `.deadvalues.yaml` as Argo CD replaces the cluster's; `--api-versions` is still added |
 | `helm.ignoreMissingValueFiles` | a missing value file is skipped instead of failing |
 | Several `valueFiles` | merged in Argo's order; each key is reported with its source file |
 | A source with `path` and no `chart` | the local chart in the repository |
+| Several Applications in one file | each one is read; one with no Helm source (plain manifests) is skipped |
+| A source with `helm` and a `path` that is not a chart in this repository (a chart from another git repository) | listed as not analyzed, with the repository and path; it is not an error, and the rest of the Application is still read |
 
 ## Flux HelmReleases
 
@@ -66,7 +73,7 @@ production:podinfo/podinfo  podinfo 6.15.0      0      0          0      7
 staging:podinfo/podinfo     podinfo 6.15.0      0      0          0      7
 ```
 
-`scan` finds the overlays to build on its own (kustomize directories no other kustomization includes). The Flux `Kustomization` objects in `clusters/<name>` are not followed: point `scan` at the app directories (`apps/production`, `infrastructure/controllers`).
+`scan` finds the overlays to build on its own (kustomize directories no other kustomization includes). A kustomize `Component` (`kind: Component`) is never built on its own, since it only makes sense inside what includes it: it is read through the overlay or the Flux `Kustomization` that lists it, with that app's namespace and variables. Point `scan` at the component's own directory to build it anyway. The Flux `Kustomization` objects in `clusters/<name>` are not followed: point `scan` at the app directories (`apps/production`, `infrastructure/controllers`).
 
 ## Flux variables
 

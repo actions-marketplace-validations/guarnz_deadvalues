@@ -61,9 +61,9 @@ example  webapp 0.1.0 → 0.2.0
   1 breaking, 1 pinned, 1 changed, 1 fixed
 ```
 
-## Compared with helm-diff and argocd-diff-preview
+## Compared with helm-diff, argocd-diff-preview and flate
 
-[helm-diff](https://github.com/databus23/helm-diff) and [argocd-diff-preview](https://github.com/dag-andersen/argocd-diff-preview) show what the rendered manifests will look like. deadvalues shows whether your values still do what you think they do.
+[helm-diff](https://github.com/databus23/helm-diff), [argocd-diff-preview](https://github.com/dag-andersen/argocd-diff-preview) and [flate](https://github.com/home-operations/flate) (for Flux) show what the rendered manifests will look like. deadvalues shows whether your values still do what you think they do.
 
 | Situation | Manifest diff | deadvalues |
 |---|---|---|
@@ -82,6 +82,7 @@ Use both: the diff shows what the cluster gets, deadvalues shows which line of y
 | Go 1.26+ | `go install github.com/guarnz/deadvalues/cmd/deadvalues@latest` |
 | Helm plugin | `helm plugin install https://github.com/guarnz/deadvalues` (Helm 4: add `--verify=false`) |
 | Container | `docker run --rm -v "$PWD:/repo" ghcr.io/guarnz/deadvalues scan apps` |
+| pre-commit | Hook `deadvalues` in `.pre-commit-config.yaml`, see [docs/install.md](https://github.com/guarnz/deadvalues/blob/main/docs/install.md#pre-commit) |
 
 ### Requirements
 

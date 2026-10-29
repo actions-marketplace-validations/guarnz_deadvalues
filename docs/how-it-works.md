@@ -4,7 +4,7 @@ deadvalues does not parse templates. It **renders the chart, removes each key yo
 
 ![Render the chart, remove a key, render again and compare](assets/how-it-works.svg)
 
-1. Render the chart twice with your values. Fields that differ between the two renders (`randAlphaNum`, generated certificates, checksum annotations) are masked as noise.
+1. Render the chart twice with your values. Fields that differ between the two renders (`randAlphaNum`, generated certificates, checksum annotations) are masked as noise. Helm test hooks are left out, as `helm template --skip-tests` does: Argo CD does not apply them either.
 2. Remove a subtree of your values and re-render. No change → every key under it is classified at once. Change → descend one level (bisection).
 3. For keys whose removal changes nothing:
    - equal to the chart default → `REDUNDANT`
@@ -62,6 +62,7 @@ With `-f` alone, the comparison runs for every Application and HelmRelease that 
 
 - `lookup` returns nothing offline, so keys read only through `lookup` can look dead. deadvalues warns when a chart uses it.
 - Keys read only in `NOTES.txt` are reported as dead on purpose: they do not reach the cluster.
+- Kustomize patches applied after a `helmCharts:` render are not taken into account; a note says so.
 - `GROUP` covers keys that only matter together inside the same map; interactions across unrelated parts of the values can still show up as `DEAD`.
 - `CONDITIONAL` detects `enabled`-style toggles; a key gated by another kind of switch (e.g. `strategy.rollingUpdate` with `type: Recreate`) is reported as `DEAD`, which is accurate for the current values.
 - Charts that render resources only when the cluster serves an API (`.Capabilities.APIVersions.Has`, or `has ... .Capabilities.APIVersions`) cannot know offline whether yours does: those keys are reported as `CONDITIONAL` on that API. See [configuration](configuration.md#api-versions).

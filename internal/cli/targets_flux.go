@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -122,6 +124,7 @@ type build struct {
 	vars                    map[string]string
 	varNotes                []string
 	namespace, label, where string
+	cluster                 string
 }
 
 // buildJobs reads the HelmReleases of a build output; keep, when set, picks them by file.
@@ -160,6 +163,7 @@ func (g *globals) buildJobs(objs []*flux.Object, root string, b build, filter *a
 			continue
 		}
 		j.notes = append(append([]string{}, j.notes...), b.varNotes...)
+		j.cluster = b.cluster
 		jobs = append(jobs, j)
 	}
 	return jobs, failed
@@ -226,7 +230,7 @@ func (g *globals) graphJobs(dir, root string, filter *appFilter) ([]job, []*repo
 		}
 		label = strings.TrimPrefix(label, a.Cluster+"/")
 		b := build{dir: a.Dir, spec: a.Spec, vars: a.Vars, varNotes: a.VarNotes, namespace: a.Spec.Namespace,
-			label: prefixed(a.Cluster, label), where: prefixed(a.Cluster, relPath(root, a.Dir))}
+			label: prefixed(a.Cluster, label), where: prefixed(a.Cluster, relPath(root, a.Dir)), cluster: "flux|" + a.Cluster}
 		js, fails := g.buildJobs(a.Objects, root, b, filter, func(file string) bool {
 			return file != "" && underDir(dir, file)
 		})
@@ -259,10 +263,48 @@ func (g *globals) notAppliedJobs(files []string, root, label, overlay string, fi
 				continue
 			}
 			jobs = append(jobs, job{name: prefixed(label, o.ID()), app: o.Name, appFile: f, ident: "flux:" + what + ":" + o.ID(), vals: values.New(),
-				skip: "not applied: no Flux Kustomization of the repository applies " + what})
+				skip: "no Flux Kustomization of the repository applies " + what, skipKind: report.SkipNotApplied})
 		}
 	}
 	return jobs
+}
+
+// unsupportedJobs lists what deploys charts in the repository and is not read yet, so
+// that it is reported instead of left out in silence.
+func (g *globals) unsupportedJobs(dir, root string, files []string, filter *appFilter) []job {
+	var jobs []job
+	add := func(name, short, file, what string) {
+		if filter.keep(file, name, short) {
+			jobs = append(jobs, job{name: name, app: short, appFile: file, ident: "unsupported:" + relPath(root, file) + ":" + name,
+				vals: values.New(), skip: what, skipKind: report.SkipUnsupported})
+		}
+	}
+	for _, o := range g.repoIndex(root).Objects {
+		if o.File == "" || !underDir(dir, o.File) {
+			continue
+		}
+		switch {
+		case o.Kind == "ApplicationSet":
+			add(o.ID(), o.Name, o.File, "ApplicationSet: the Applications it generates are not read")
+		case o.Kind == "ResourceSet" && flux.ResourceSetGenerates(o, "HelmRelease"):
+			add(o.ID(), o.Name, o.File, "ResourceSet: the HelmReleases it generates are not read")
+		}
+	}
+	for _, f := range files {
+		if isHelmfile(f) {
+			add(relPath(root, f), filepath.Base(f), f, "helmfile: its releases are not read")
+		}
+	}
+	return jobs
+}
+
+func isHelmfile(file string) bool {
+	parent := filepath.Base(filepath.Dir(file))
+	if !strings.HasPrefix(filepath.Base(file), "helmfile") && parent != "helmfile" && parent != "helmfile.d" {
+		return false
+	}
+	data, err := os.ReadFile(file)
+	return err == nil && bytes.Contains(append([]byte("\n"), data...), []byte("\nreleases:"))
 }
 
 func underDir(dir, file string) bool {

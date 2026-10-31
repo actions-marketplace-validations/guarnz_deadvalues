@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -680,8 +681,169 @@ spec:
 			t.Errorf("%s: want it analyzed once per cluster, got %+v in %v", app, c, got)
 		}
 	}
-	if c := got["staging:demo"]; !strings.Contains(c.Skipped, "not applied") || !strings.Contains(c.Skipped, "apps/staging") {
+	if c := got["staging:demo"]; c.SkipKind != "notApplied" || !strings.Contains(c.Skipped, "apps/staging") {
 		t.Errorf("no Kustomization applies the staging overlay, got skipped %q in %v", c.Skipped, got)
+	}
+}
+
+func TestScanFindsCRDsTheClusterInstalls(t *testing.T) {
+	root := t.TempDir()
+	chart := func(name, templates string, files map[string]string) {
+		dir := filepath.Join(root, "charts", name)
+		writeFile(t, filepath.Join(dir, "Chart.yaml"), "apiVersion: v2\nname: "+name+"\nversion: 0.1.0\n")
+		writeFile(t, filepath.Join(dir, "templates", "all.yaml"), templates)
+		for f, c := range files {
+			writeFile(t, filepath.Join(dir, f), c)
+		}
+	}
+	crd := func(group string) string {
+		return "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets." + group + "\nspec:\n  group: " + group + "\n  names: {kind: Widget, plural: widgets}\n  scope: Namespaced\n  versions:\n    - {name: v1, served: true, storage: true}\n"
+	}
+	chart("app", `{{- if .Capabilities.APIVersions.Has "static.example.com/v1" }}
+kind: Widget
+metadata: {name: {{ .Values.fromChartDir }}}
+{{- end }}
+---
+{{- if .Capabilities.APIVersions.Has "templated.example.com/v1" }}
+kind: Widget
+metadata: {name: {{ .Values.fromTemplate }}}
+{{- end }}
+---
+{{- if .Capabilities.APIVersions.Has "plain.example.com/v1/Widget" }}
+kind: Widget
+metadata: {name: {{ .Values.fromPlainFile }}}
+{{- end }}
+---
+{{- if .Capabilities.APIVersions.Has "off.example.com/v1" }}
+kind: Widget
+metadata: {name: {{ .Values.fromDisabled }}}
+{{- end }}
+`, nil)
+	chart("guarded", `{{- if not (or (.Capabilities.APIVersions.Has "static.example.com/v1") .Values.trustCRDs) }}
+{{- fail "needs the CRD" }}
+{{- end }}
+kind: ConfigMap
+metadata: {name: guarded}
+`, nil)
+	chart("operator", "kind: ConfigMap\nmetadata: {name: x}\n", map[string]string{"crds/widget.yaml": crd("static.example.com")})
+	chart("templated", "{{- if .Values.crds.enabled }}\n"+crd("templated.example.com")+"{{- end }}\n", map[string]string{"values.yaml": "crds: {enabled: false}\n"})
+	chart("disabled", "{{- if .Values.crds.enabled }}\n"+crd("off.example.com")+"{{- end }}\n", map[string]string{"values.yaml": "crds: {enabled: false}\n"})
+
+	release := func(name, chartName, values string) string {
+		return `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: ` + name + `
+  namespace: apps
+spec:
+  chart:
+    spec:
+      chart: ./charts/` + chartName + `
+      sourceRef:
+        kind: GitRepository
+        name: flux-system
+        namespace: flux-system
+  values:
+` + values
+	}
+	app := "    fromChartDir: a\n    fromTemplate: b\n    fromPlainFile: c\n    fromDisabled: d\n"
+	cluster := func(name string) {
+		dir := filepath.Join(root, "clusters", name)
+		writeFile(t, filepath.Join(dir, "flux-system", "kustomization.yaml"), "resources: [gotk-sync.yaml]\n")
+		writeFile(t, filepath.Join(dir, "flux-system", "gotk-sync.yaml"), "apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata:\n  name: flux-system\n  namespace: flux-system\nspec:\n  path: ./clusters/"+name+"\n")
+		writeFile(t, filepath.Join(dir, "apps.yaml"), "apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata:\n  name: apps\n  namespace: flux-system\nspec:\n  path: ./apps/"+name+"\n")
+	}
+	cluster("main")
+	cluster("edge")
+	writeFile(t, filepath.Join(root, "apps", "main", "kustomization.yaml"), "resources: [app.yaml, guarded.yaml, operator.yaml, templated.yaml, disabled.yaml, widgets.yaml]\n")
+	writeFile(t, filepath.Join(root, "apps", "main", "guarded.yaml"), release("guarded", "guarded", "    trustCRDs: true\n"))
+	writeFile(t, filepath.Join(root, "apps", "main", "app.yaml"), release("web", "app", app))
+	writeFile(t, filepath.Join(root, "apps", "main", "operator.yaml"), release("operator", "operator", "    {}\n"))
+	writeFile(t, filepath.Join(root, "apps", "main", "templated.yaml"), release("templated", "templated", "    crds: {enabled: true}\n"))
+	writeFile(t, filepath.Join(root, "apps", "main", "disabled.yaml"), release("disabled", "disabled", "    crds: {enabled: false}\n"))
+	writeFile(t, filepath.Join(root, "apps", "main", "widgets.yaml"), crd("plain.example.com"))
+	writeFile(t, filepath.Join(root, "apps", "edge", "kustomization.yaml"), "resources: [app.yaml]\n")
+	writeFile(t, filepath.Join(root, "apps", "edge", "app.yaml"), release("web", "app", app))
+
+	out, stderr := runCLISplit(t, "scan", filepath.Join(root, "apps"), "--repo-root", root, "-o", "json", "--fail-on", "none")
+	got := map[string]anyCheck{}
+	for _, c := range decodeChecks(t, out) {
+		got[c.App] = c
+	}
+	status := func(app, key string) string {
+		for _, k := range got[app].Keys {
+			if k.Key == key {
+				return k.Status
+			}
+		}
+		return ""
+	}
+	for key, want := range map[string]string{"fromChartDir": "ALIVE", "fromTemplate": "ALIVE", "fromPlainFile": "ALIVE", "fromDisabled": "CONDITIONAL"} {
+		if s := status("main:main:apps/web", key); s != want {
+			t.Errorf("main %s = %s, want %s\n%v", key, s, want, got)
+		}
+	}
+	if s := status("main:main:apps/guarded", "trustCRDs"); s != "ALIVE" {
+		t.Errorf("trustCRDs = %s: it matters until the CRD exists, as on a first install", s)
+	}
+	for _, key := range []string{"fromChartDir", "fromTemplate", "fromPlainFile"} {
+		if s := status("edge:edge:apps/web", key); s != "CONDITIONAL" {
+			t.Errorf("edge %s = %s: a CRD of another cluster does not count", key, s)
+		}
+	}
+	if !strings.Contains(stderr, "APIs served by CRDs in the repository: ") || !strings.Contains(stderr, "main: static.example.com/v1") {
+		t.Errorf("stderr = %q", stderr)
+	}
+
+	out, _ = runCLISplit(t, "scan", filepath.Join(root, "apps", "main"), "--only", "web", "--repo-root", root, "-o", "json", "--fail-on", "none")
+	only := decodeChecks(t, out)
+	if len(only) != 1 {
+		t.Fatalf("--only web: %+v", only)
+	}
+	for _, k := range only[0].Keys {
+		if k.Key == "fromChartDir" && k.Status != "ALIVE" {
+			t.Errorf("--only leaves the operator out of the report, not out of the cluster: %s", k.Status)
+		}
+	}
+}
+
+func TestScanReportsWhatItDoesNotReadYet(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "apps", "appset.yaml"), "apiVersion: argoproj.io/v1alpha1\nkind: ApplicationSet\nmetadata:\n  name: fleet\n  namespace: argocd\nspec:\n  generators: []\n")
+	writeFile(t, filepath.Join(root, "apps", "releases.yaml"), `apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: workers
+  namespace: apps
+spec:
+  inputs: [{node: one}]
+  resources:
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata: {name: "worker-<< inputs.node >>"}
+`)
+	writeFile(t, filepath.Join(root, "apps", "namespaces.yaml"), "apiVersion: fluxcd.controlplane.io/v1\nkind: ResourceSet\nmetadata:\n  name: namespaces\nspec:\n  resources:\n    - {apiVersion: v1, kind: Namespace}\n")
+	writeFile(t, filepath.Join(root, "apps", "helmfile.yaml"), "repositories: []\nreleases:\n  - {name: x, chart: y/z}\n")
+	writeFile(t, filepath.Join(root, "apps", "helmfile-values.yaml"), "replicas: 1\n")
+
+	out, code := runCLI(t, "scan", filepath.Join(root, "apps"), "--repo-root", root, "-o", "json")
+	if code != 0 {
+		t.Fatalf("what is not read yet must not fail the scan: exit %d\n%s", code, out)
+	}
+	got := map[string]string{}
+	for _, c := range decodeChecks(t, out) {
+		got[c.App] = c.SkipKind
+	}
+	want := map[string]string{"argocd/fleet": "unsupported", "apps/workers": "unsupported", "apps/helmfile.yaml": "unsupported"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("apps = %v, want %v", got, want)
+	}
+	table, _ := runCLI(t, "scan", filepath.Join(root, "apps"), "--repo-root", root)
+	if !strings.Contains(table, "not supported yet: ApplicationSet") || !strings.Contains(table, "3 not supported yet") {
+		t.Errorf("table:\n%s", table)
+	}
+	if skipped, _ := runCLI(t, "scan", filepath.Join(root, "apps"), "--repo-root", root, "--skip", "fleet,workers,helmfile.yaml,apps/helmfile.yaml", "-o", "json"); strings.Contains(skipped, "fleet") {
+		t.Errorf("--skip should leave them out:\n%s", skipped)
 	}
 }
 
@@ -711,7 +873,7 @@ spec:
 	out, _ := runCLI(t, "scan", filepath.Join(root, "apps"), "--repo-root", root, "-o", "json", "--fail-on", "none")
 	found := false
 	for _, c := range decodeChecks(t, out) {
-		found = found || strings.HasPrefix(c.App, "staging:") && strings.Contains(c.Skipped, "not applied")
+		found = found || strings.HasPrefix(c.App, "staging:") && c.SkipKind == "notApplied"
 	}
 	if !found {
 		t.Errorf("the staging overlay reads only the base production also reads; it must be reported, not lost:\n%s", out)

@@ -1,6 +1,7 @@
 package render
 
 import (
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -76,6 +77,94 @@ func TestChartCRDs(t *testing.T) {
 	}
 	if !r.DeclaresCRD("example.com") || r.DeclaresCRD("other.io") {
 		t.Error("DeclaresCRD should need CustomResourceDefinition and the group in the same template")
+	}
+}
+
+func TestRenderListsTheCRDsOfActiveSubcharts(t *testing.T) {
+	sub := &chart.Chart{
+		Metadata: &chart.Metadata{APIVersion: chart.APIVersionV2, Name: "crds", Version: "0.1.0"},
+		Files: []*common.File{{Name: "crds/widgets.yaml", Data: []byte(`kind: CustomResourceDefinition
+metadata:
+  name: widgets.example.com
+spec:
+  group: example.com
+---
+kind: CustomResourceDefinition
+metadata:
+  name: gadgets.example.com
+`)}},
+	}
+	c := &chart.Chart{
+		Metadata: &chart.Metadata{APIVersion: chart.APIVersionV2, Name: "demo", Version: "0.1.0", Dependencies: []*chart.Dependency{
+			{Name: "crds", Version: "0.1.0", Condition: "crds.enabled"},
+		}},
+		Files:  []*common.File{{Name: "crds/own.yaml", Data: []byte("kind: CustomResourceDefinition\nmetadata:\n  name: own.example.com\n")}},
+		Values: map[string]interface{}{"crds": map[string]interface{}{"enabled": true}},
+	}
+	c.SetDependencies(sub)
+	off := map[string]interface{}{"crds": map[string]interface{}{"enabled": false}}
+	for _, tt := range []struct {
+		name string
+		opts Options
+		vals map[string]interface{}
+		want string
+	}{
+		{"active", Options{}, nil, "demo/charts/crds/crds/widgets.yaml"},
+		{"turned off", Options{}, off, ""},
+		{"not applied", Options{SkipCRDs: true}, nil, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, err := New(c, tt.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range []*Renderer{r, r.WithAPIVersions([]string{"example.com/v1"})} {
+				out, err := r.Render(tt.vals)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var names []string
+				for name := range out {
+					names = append(names, filepath.ToSlash(name))
+				}
+				if strings.Join(names, ",") != tt.want {
+					t.Errorf("rendered %v, want %q", names, tt.want)
+				}
+				if tt.want == "" {
+					continue
+				}
+				for _, content := range out {
+					if !strings.Contains(content, `"widgets.example.com"`) || !strings.Contains(content, `"gadgets.example.com"`) || strings.Contains(content, "spec") {
+						t.Errorf("want only the kind and name of both CRDs:\n%s", content)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRenderSkipsTheSchemaWhenAsked(t *testing.T) {
+	c := &chart.Chart{
+		Metadata:  &chart.Metadata{APIVersion: chart.APIVersionV2, Name: "demo", Version: "0.1.0"},
+		Schema:    []byte(`{"type": "object", "properties": {"port": {"type": "integer"}}}`),
+		Templates: []*common.File{{Name: "templates/config.yaml", Data: []byte("kind: ConfigMap\ndata:\n  port: {{ .Values.port | quote }}\n")}},
+	}
+	vals := map[string]interface{}{"port": "open"}
+	strict, err := New(c, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := strict.Render(vals); err == nil {
+		t.Error("the schema must reject the value")
+	}
+	loose, err := New(c, Options{SkipSchemaValidation: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []*Renderer{loose, loose.WithAPIVersions([]string{"example.com/v1"})} {
+		if _, err := r.Render(vals); err != nil {
+			t.Errorf("the schema must be skipped: %v", err)
+		}
 	}
 }
 

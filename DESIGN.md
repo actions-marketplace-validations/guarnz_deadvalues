@@ -91,7 +91,7 @@ The pipeline has one shape for every command:
 ```
 Deployment/apps/web:.spec.strategy.type = "Recreate"
 ```
-So the comparison does not break if a chart moves a resource to another template. `NOTES.txt`, partials and Helm test hooks (`helm.sh/hook: test`, as `helm template --skip-tests` leaves out and Argo CD ignores) are not part of the output; a test Pod with a random name would otherwise make every key look alive.
+So the comparison does not break if a chart moves a resource to another template. `NOTES.txt`, partials and Helm test hooks (`helm.sh/hook: test`, as `helm template --skip-tests` leaves out and Argo CD ignores) are not part of the output; a test Pod with a random name would otherwise make every key look alive. The `crds/` files of active subcharts are part of the output, by kind and name only: the Helm engine does not render them, yet Argo CD and Flux apply them, so without them `crds.enabled` of kube-prometheus-stack would look dead. They are read once per chart, since these files are large and a chart renders many times. The chart's own `crds/` stay out, because no value turns them off.
 
 **3. Removal with bisection.** For each top-level key:
 ```
@@ -102,7 +102,7 @@ remove the whole subtree → render → compare with BASE
 ```
 A whole branch without effect costs one render to find, so a large block of dead or redundant keys is not probed key by key; only the keys found without effect get the extra tests of step 4. Renders run in parallel (worker pool) on a chart cloned in memory for each render.
 
-If removing a map changes the output but no child alone does (`{{ if or .a .b }}`), the map is `GROUP`, and its children are not reported dead. If removing a key breaks the render (`required`, schema), it is `ERROR`: required, therefore alive.
+If removing a map changes the output but no child alone does (`{{ if or .a .b }}`), the map is `GROUP`, and its children are not reported dead. If removing a key breaks the render (`required`, schema), it is `REQUIRED`, therefore alive. An app that does not render at all is a different thing: it has an error, and it is not analyzed.
 
 **4. Classifying the keys without effect.** Removing the key changed nothing. Why?
 
@@ -137,6 +137,8 @@ A `global-values.yaml` loaded by ten charts is dead in some and alive in others.
 ### Charts in memory
 
 A chart is downloaded once into memory (`loader.LoadArchive`) and **cloned** for each render, copying only what dependency processing mutates (values, dependency metadata, the subchart list). Parsing the chart for every render cost n8n 9s; cloning made it 0.5s. Remote charts are cached as `.tgz` on disk, keyed by repository path, chart and version.
+
+A chart without its `charts/` directory renders almost nothing, so the dependencies it lacks are fetched as Argo CD and Flux build them. For a local chart this is best effort: it always rendered without them, and losing the network must not turn an analysis into an error, so a dependency that fails stays out, a note names it, and the failure is remembered for the run because many charts share a dependency and each would wait for the same timeout. A chart cloned from another repository is strict instead: a partial clone is reported as not analyzed, and its `file://` paths must stay inside the clone, which comes from a URL in a manifest. A local chart has no such limit, because `file://../common` is usual in a repository and what it reads is the user's own checkout.
 
 ---
 

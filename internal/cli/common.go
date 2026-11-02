@@ -73,6 +73,10 @@ type job struct {
 	// kubeVersion and apiVersions are the app's own, as an Argo CD source can set them.
 	kubeVersion string
 	apiVersions []string
+	// skipCRDs is set when the app does not apply the crds/ files of the chart.
+	skipCRDs bool
+	// skipSchema is set when the app renders without checking values.schema.json.
+	skipSchema bool
 }
 
 func (g *globals) jobs(t *targetFlags) ([]job, error) {
@@ -149,11 +153,13 @@ func (g *globals) renderer(ctx context.Context, j job, ref source.Ref) (*render.
 		apis = append(append([]string{}, g.flagAPIVersions...), j.apiVersions...)
 	}
 	return render.New(c, render.Options{
-		Release:      j.release,
-		Namespace:    j.namespace,
-		KubeVersion:  kube,
-		APIVersions:  apis,
-		Placeholders: j.placeholders,
+		Release:              j.release,
+		Namespace:            j.namespace,
+		KubeVersion:          kube,
+		APIVersions:          apis,
+		Placeholders:         j.placeholders,
+		SkipCRDs:             j.skipCRDs,
+		SkipSchemaValidation: j.skipSchema,
 	})
 }
 
@@ -219,6 +225,9 @@ func (g *globals) analyze(ctx context.Context, j job, ref source.Ref) (*analysis
 	}
 	if dead && r.UsesLookup() {
 		a.notes = append(a.notes, "the chart uses lookup, which is empty offline; keys read only through it can look dead")
+	}
+	if missing := r.MissingDependencies(); dead && len(missing) > 0 {
+		a.notes = append(a.notes, "dependencies could not be fetched ("+strings.Join(missing, ", ")+"); keys read only by them can look dead")
 	}
 	return a, nil
 }

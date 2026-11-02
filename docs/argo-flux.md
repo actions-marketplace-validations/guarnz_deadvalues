@@ -26,8 +26,10 @@
 | `helm.kubeVersion` | the Kubernetes version for that app, over `kubeVersion` of `.deadvalues.yaml`; `--kube-version` still wins |
 | `helm.apiVersions` | the APIs for that app, replacing `apiVersions` of `.deadvalues.yaml` as Argo CD replaces the cluster's; `--api-versions` is still added |
 | `helm.ignoreMissingValueFiles` | a missing value file is skipped instead of failing |
+| `helm.skipCrds` | the `crds/` files of subcharts do not count in the comparison, as they are not applied |
+| `helm.skipSchemaValidation` | the chart renders without checking `values.schema.json` |
 | Several `valueFiles` | merged in Argo's order; each key is reported with its source file |
-| A source with `path` and no `chart` | the local chart in the repository |
+| A source with `path` and no `chart` | the local chart in the repository, with the dependencies its `charts/` directory lacks, as Argo CD builds them |
 | Several Applications in one file | each one is read; one with no Helm source (plain manifests) is skipped |
 | A source with `helm` and a `path` that is not a chart in this repository (a chart from another git repository) | the chart is fetched from `repoURL` at `targetRevision` (branch, tag, commit or semver range), with the value files next to it; `diff` compares two revisions like two chart versions. When it cannot be fetched, such as a private repository without credentials, it is listed as not analyzed, with the reason; it is not an error, and the rest of the Application is still read |
 
@@ -48,6 +50,8 @@
 | `valuesFrom[].targetPath` | the value goes to that path, like `--set` |
 | `valuesFrom[].optional` | missing and optional: ignored, like the helm-controller does |
 | Merge order | `valuesFrom` in list order, then `spec.values` on top, as the helm-controller does |
+| `install.crds: Skip`, `install.skipCRDs` | the `crds/` files of subcharts do not count in the comparison, as they are not installed |
+| `install.disableSchemaValidation`, `upgrade.disableSchemaValidation` | either one makes the chart render without checking `values.schema.json` |
 | Release name | `spec.releaseName`; otherwise `<targetNamespace>-<name>` when there is a `targetNamespace`; otherwise the name |
 | Namespace | `spec.targetNamespace`, otherwise the `targetNamespace` of the Flux `Kustomization` that applies the directory, otherwise `metadata.namespace`, otherwise `default` |
 
@@ -67,6 +71,7 @@ Argo CD renders a kustomize directory with `helmCharts:` through `kustomize buil
 | `releaseName`, `namespace` | the release; without `releaseName` the chart name is used instead of kustomize's random one |
 | `valuesFile`, `valuesInline`, `additionalValuesFiles` | merged in kustomize's order: `valuesInline` over `valuesFile` (`valuesMerge: override`, the default), the other way round with `merge`, `valuesInline` alone with `replace`, then `additionalValuesFiles`. Keys from `valuesInline` point to their line in the kustomization |
 | `apiVersions`, `kubeVersion` | used for the render, as with a Helm source |
+| `includeCRDs` | the `crds/` files of subcharts count in the comparison only with `true`, because kustomize leaves them out by default |
 | `resources`, `components` | local bases and components are read too, and so are the `kustomize.components` of the Application |
 
 A directory an Application points at is shown with the Application's name. `scan` also reads the kustomize directories with `helmCharts:` that no Application points at, which covers an `ApplicationSet` with a git directory generator and plain `kustomize build`: they are shown with their path, such as `apps/immich`. When two charts of one kustomization would get the same name, such as two entries with the same `releaseName`, the chart name is added: `apps/nextcloud/nextcloud/app-template`.

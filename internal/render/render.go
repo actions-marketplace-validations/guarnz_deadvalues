@@ -4,6 +4,7 @@ package render
 
 import (
 	"bytes"
+	"fmt"
 	"path"
 	"regexp"
 	"slices"
@@ -30,6 +31,10 @@ type Options struct {
 	APIVersions []string
 	// Placeholders are paths set from values that exist only on the cluster.
 	Placeholders [][]string
+	// SkipCRDs leaves out the crds/ files of subcharts, for an app that does not apply them.
+	SkipCRDs bool
+	// SkipSchemaValidation renders values that values.schema.json rejects, as the app asks for.
+	SkipSchemaValidation bool
 }
 
 // Placeholder stands in for a value that exists only on the cluster.
@@ -39,6 +44,9 @@ type Renderer struct {
 	chart *chart.Chart
 	opts  common.ReleaseOptions
 	caps  *common.Capabilities
+	// crds holds the objects of each crds/ file of a subchart, read once per chart.
+	crds       map[*common.File]string
+	skipSchema bool
 }
 
 func New(c *chart.Chart, o Options) (*Renderer, error) {
@@ -65,11 +73,16 @@ func New(c *chart.Chart, o Options) (*Renderer, error) {
 			return nil, err
 		}
 	}
-	return &Renderer{
-		chart: c,
-		opts:  common.ReleaseOptions{Name: o.Release, Namespace: o.Namespace, Revision: 1, IsInstall: true},
-		caps:  caps,
-	}, nil
+	r := &Renderer{
+		chart:      c,
+		opts:       common.ReleaseOptions{Name: o.Release, Namespace: o.Namespace, Revision: 1, IsInstall: true},
+		caps:       caps,
+		skipSchema: o.SkipSchemaValidation,
+	}
+	if !o.SkipCRDs {
+		r.crds = subchartCRDs(c)
+	}
+	return r, nil
 }
 
 func (r *Renderer) Label() string {
@@ -81,6 +94,17 @@ func (r *Renderer) Name() string { return r.chart.Metadata.Name }
 func (r *Renderer) Version() string { return r.chart.Metadata.Version }
 
 func (r *Renderer) UsesLookup() bool { return usesLookup(r.chart) }
+
+// MissingDependencies lists what Chart.yaml declares and the chart came without.
+func (r *Renderer) MissingDependencies() []string {
+	var out []string
+	for _, d := range r.chart.Metadata.Dependencies {
+		if !slices.ContainsFunc(r.chart.Dependencies(), func(c *chart.Chart) bool { return c.Name() == d.Name }) {
+			out = append(out, d.Name)
+		}
+	}
+	return out
+}
 
 // Defaults returns the chart's values.yaml coalesced with its subcharts.
 func (r *Renderer) Defaults() (map[string]interface{}, error) {
@@ -98,7 +122,7 @@ func (r *Renderer) Render(vals map[string]interface{}) (map[string]string, error
 	if err := chartutil.ProcessDependencies(c, vals); err != nil {
 		return nil, err
 	}
-	top, err := commonutil.ToRenderValues(c, vals, r.opts, r.caps)
+	top, err := commonutil.ToRenderValuesWithSchemaValidation(c, vals, r.opts, r.caps, r.skipSchema)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +141,44 @@ func (r *Renderer) Render(vals map[string]interface{}) (map[string]string, error
 		}
 		manifests[name] = content
 	}
+	for _, d := range c.Dependencies() {
+		for _, crd := range d.CRDObjects() {
+			if objects := r.crds[crd.File]; objects != "" {
+				manifests[crd.Filename] = objects
+			}
+		}
+	}
 	return manifests, nil
+}
+
+// subchartCRDs reads the crds/ files of the subcharts. The chart's own are left out: a
+// condition can turn off a subchart, but nothing turns off those.
+func subchartCRDs(c *chart.Chart) map[*common.File]string {
+	crds := map[*common.File]string{}
+	for _, d := range c.Dependencies() {
+		for _, crd := range d.CRDObjects() {
+			crds[crd.File] = objectNames(crd.File.Data)
+		}
+	}
+	return crds
+}
+
+// objectNames keeps only the kind and name of each object of a file: CRDs are large, and
+// which ones are installed is all a value can change.
+func objectNames(data []byte) string {
+	var out strings.Builder
+	for _, doc := range releaseutil.SplitManifests(string(data)) {
+		var m struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &m); err == nil && m.Kind != "" && m.Metadata.Name != "" {
+			fmt.Fprintf(&out, "---\nkind: %s\nmetadata:\n  name: %q\n", m.Kind, m.Metadata.Name)
+		}
+	}
+	return out.String()
 }
 
 // withoutTests drops the Helm test hooks of a rendered template, as `helm template
@@ -216,7 +277,7 @@ func withPlaceholders(c *chart.Chart, paths [][]string) (*chart.Chart, error) {
 func (r *Renderer) WithAPIVersions(apis []string) *Renderer {
 	caps := r.caps.Copy()
 	caps.APIVersions = append(append(common.VersionSet{}, r.caps.APIVersions...), withGroupVersions(apis)...)
-	return &Renderer{chart: r.chart, opts: r.opts, caps: caps}
+	return &Renderer{chart: r.chart, opts: r.opts, caps: caps, crds: r.crds, skipSchema: r.skipSchema}
 }
 
 // withGroupVersions adds the group/version of each group/version/Kind entry,

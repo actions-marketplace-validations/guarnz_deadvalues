@@ -32,6 +32,10 @@ type Release struct {
 	Notes       []string
 	// Placeholders are the targetPaths of valuesFrom sources not in the repository.
 	Placeholders [][]string
+	// SkipCRDs is set when the release does not install the crds/ files of the chart.
+	SkipCRDs bool
+	// SkipSchemaValidation renders values that values.schema.json rejects, as the release asks for.
+	SkipSchemaValidation bool
 }
 
 // Resolver turns HelmReleases into releases, with sources, ConfigMaps and Secrets from
@@ -69,6 +73,8 @@ func (r *Resolver) Resolve(rel *Object) (*Release, error) {
 		ns = "default"
 	}
 	out := &Release{Object: rel, ID: ns + "/" + rel.Name, Values: values.New()}
+	out.SkipCRDs = Str(spec, "install", "crds") == "Skip" || Str(spec, "install", "skipCRDs") == "true"
+	out.SkipSchemaValidation = Str(spec, "install", "disableSchemaValidation") == "true" || Str(spec, "upgrade", "disableSchemaValidation") == "true"
 
 	ref, err := r.chart(rel, spec, ns)
 	if err != nil {

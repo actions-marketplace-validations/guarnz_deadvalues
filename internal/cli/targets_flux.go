@@ -371,6 +371,8 @@ func releaseJob(rel *flux.Release, label, file, where string, t *targetFlags) (j
 		vals:         rel.Values,
 		notes:        rel.Notes,
 		placeholders: rel.Placeholders,
+		skipCRDs:     rel.SkipCRDs,
+		skipSchema:   rel.SkipSchemaValidation,
 	}
 	if t != nil {
 		if err := addExtra(j.vals, t); err != nil {

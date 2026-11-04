@@ -684,6 +684,27 @@ spec:
 	if c := got["staging:demo"]; c.SkipKind != "notApplied" || !strings.Contains(c.Skipped, "apps/staging") {
 		t.Errorf("no Kustomization applies the staging overlay, got skipped %q in %v", c.Skipped, got)
 	}
+
+	copyDir(t, filepath.Join(root, "apps", "staging"), filepath.Join(root, "apps", "preview"))
+	writeFile(t, filepath.Join(root, "dev", "sync.yaml"), `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: dev
+spec:
+  path: ./apps/preview
+  sourceRef:
+    kind: OCIRepository
+    name: dev
+`)
+	out, _ = runCLI(t, "scan", filepath.Join(root, "apps"), "--repo-root", root, "-o", "json", "--fail-on", "none")
+	preview, staging := false, false
+	for _, c := range decodeChecks(t, out) {
+		preview = preview || strings.HasPrefix(c.App, "preview:") && c.SkipKind == ""
+		staging = staging || strings.HasPrefix(c.App, "staging:") && c.SkipKind == "notApplied"
+	}
+	if !preview || !staging {
+		t.Errorf("an artifact can apply the preview overlay and only it, got preview %v, staging %v\n%s", preview, staging, out)
+	}
 }
 
 func TestScanFindsCRDsTheClusterInstalls(t *testing.T) {
@@ -724,7 +745,7 @@ metadata: {name: {{ .Values.fromDisabled }}}
 {{- end }}
 kind: ConfigMap
 metadata: {name: guarded}
-`, nil)
+`, map[string]string{"values.schema.json": `{"type": "object", "properties": {"probe": {"type": "object", "required": ["port"]}}}`})
 	chart("operator", "kind: ConfigMap\nmetadata: {name: x}\n", map[string]string{"crds/widget.yaml": crd("static.example.com")})
 	chart("templated", "{{- if .Values.crds.enabled }}\n"+crd("templated.example.com")+"{{- end }}\n", map[string]string{"values.yaml": "crds: {enabled: false}\n"})
 	chart("disabled", "{{- if .Values.crds.enabled }}\n"+crd("off.example.com")+"{{- end }}\n", map[string]string{"values.yaml": "crds: {enabled: false}\n"})
@@ -756,7 +777,7 @@ spec:
 	cluster("main")
 	cluster("edge")
 	writeFile(t, filepath.Join(root, "apps", "main", "kustomization.yaml"), "resources: [app.yaml, guarded.yaml, operator.yaml, templated.yaml, disabled.yaml, widgets.yaml]\n")
-	writeFile(t, filepath.Join(root, "apps", "main", "guarded.yaml"), release("guarded", "guarded", "    trustCRDs: true\n"))
+	writeFile(t, filepath.Join(root, "apps", "main", "guarded.yaml"), release("guarded", "guarded", "    trustCRDs: true\n    probe: {port: 80}\n"))
 	writeFile(t, filepath.Join(root, "apps", "main", "app.yaml"), release("web", "app", app))
 	writeFile(t, filepath.Join(root, "apps", "main", "operator.yaml"), release("operator", "operator", "    {}\n"))
 	writeFile(t, filepath.Join(root, "apps", "main", "templated.yaml"), release("templated", "templated", "    crds: {enabled: true}\n"))
@@ -785,6 +806,9 @@ spec:
 	}
 	if s := status("main:main:apps/guarded", "trustCRDs"); s != "ALIVE" {
 		t.Errorf("trustCRDs = %s: it matters until the CRD exists, as on a first install", s)
+	}
+	if s := status("main:main:apps/guarded", "probe.port"); s != "DEAD" {
+		t.Errorf("probe.port = %s: the schema needs it with or without the CRD, which says nothing about a first install", s)
 	}
 	for _, key := range []string{"fromChartDir", "fromTemplate", "fromPlainFile"} {
 		if s := status("edge:edge:apps/web", key); s != "CONDITIONAL" {

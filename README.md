@@ -179,7 +179,7 @@ Removes keys by deleting only their lines, so comments and formatting stay intac
 
 | `diff` | Meaning |
 |---|---|
-| `BREAKING` | Worked before, has no effect now |
+| `BREAKING` | Worked before, has no effect now; or the new chart does not render with your values, with the chart's message |
 | `PINNED` | Was equal to the default; the default changed, so your value now pins the old behavior |
 | `CHANGED` | A default you do not set changed and alters the manifests |
 | `FIXED` | Was dead, works now |
@@ -233,8 +233,8 @@ No script is needed around it: the action installs the release matching its ref,
 - [How it works](https://github.com/guarnz/deadvalues/blob/main/docs/how-it-works.md): the render-and-compare method, shared values files, git refs and limitations
 - [Argo CD and Flux](https://github.com/guarnz/deadvalues/blob/main/docs/argo-flux.md): supported fields, kustomize overlays and `${var}` substitution
 - [Configuration](https://github.com/guarnz/deadvalues/blob/main/docs/configuration.md): `.deadvalues.yaml`, ignoring keys and declaring cluster APIs
-- [Output](https://github.com/guarnz/deadvalues/blob/main/docs/output.md): formats, writing reports to files, color and exit codes
 - [GitHub Action](https://github.com/guarnz/deadvalues/blob/main/docs/github-action.md): the built-in flow, your own command, setup only, inputs and outputs
+- [Output](https://github.com/guarnz/deadvalues/blob/main/docs/output.md): formats, writing reports to files, color and exit codes
 
 ## Development
 

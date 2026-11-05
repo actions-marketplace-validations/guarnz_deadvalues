@@ -73,13 +73,11 @@ same is done for the Applications and HelmReleases that load those files.`,
 				if len(reports) == 0 {
 					return g.emit(func(w *report.Writer) error {
 						switch w.Format {
-						case "json":
-							fmt.Fprintln(w.Out, "[]")
 						case "markdown":
 							fmt.Fprint(w.Out, "No chart version changed.\n\n")
 						case "table":
 							fmt.Fprintln(w.Out, "no chart version changed")
-						case "sarif":
+						case "json", "sarif":
 							return w.Diffs(nil)
 						}
 						return nil
@@ -465,6 +463,10 @@ func (g *globals) diff(ctx context.Context, j job, oldRef, newRef source.Ref) *r
 		return fail(err)
 	}
 	newA, err := g.analyze(ctx, j, newRef)
+	var rejected *renderError
+	if errors.As(err, &rejected) && !networkFailure(err) {
+		return report.RejectedDiff(j.name, j.appFile, oldA.renderer.Name(), oldA.renderer.Version(), to, j.vals, rejected.err, oldA.result.Renders, time.Since(start))
+	}
 	if err != nil {
 		return fail(err)
 	}
